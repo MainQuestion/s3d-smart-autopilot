@@ -1,8 +1,8 @@
 # s3d Smart Autopilot
 
-[English](README.md) | [Українська](README.ua.md) | [Русский](README.ru.md)
+English | [Українська](README.ua.md) | [Русский](README.ru.md)
 
-A fork of [SiaFoundation/s3d](https://github.com/SiaFoundation/s3d), the S3-compatible gateway for Sia, built to work with **indexd Smart Autopilot**.
+A fork of [SiaFoundation/s3d](https://github.com/SiaFoundation/s3d), the S3-compatible gateway for Sia, designed to work together with **indexd Smart Autopilot**.
 
 > **Status: alpha.** This release has been tested on one Windows node. APIs and behavior may change between alpha releases.
 
@@ -13,60 +13,81 @@ S3 client
    |
    v
 s3d Smart Autopilot
-   |  consumes redundancy policy and transfer limits
+   |  receives redundancy policy and transfer limits
+   |  and sends transfer measurements
    v
 indexd Smart Autopilot
-   |  provides account policy and storage-placement controls
+   |  provides account policy, placement management
+   |  and host scores
    v
 Sia hosts
 ```
 
-The responsibilities are deliberately split between the components. `indexd` provides the policy and transfer-limit values; `s3d` consumes them when validating its erasure-coding scheme and controlling transfers. This alpha does not implement the complete host-scoring or host-portfolio selection system inside `s3d`.
+Responsibilities are intentionally separated. `indexd` provides policy values, transfer limits, and host scores, while `s3d` uses them to validate erasure-coding schemes, manage transfers, and submit real transfer measurements. The full host-scoring and portfolio-selection system lives on the `indexd` side, not inside `s3d`.
 
 ## Release
 
-| Item | Value |
+| Parameter | Value |
 |---|---|
-| Release | `v0.1.0-alpha.1` |
-| Build version | `v0.2.1-a538024` |
+| Release | `v0.2.0-alpha.1` |
+| Build version | `v0.2.1-ba6f8c9` |
 | Upstream base | `s3d v0.2.1` |
-| Companion indexer | `indexd Smart Autopilot v0.1.0-alpha.1` (`v0.6.1-9fd0bf52`) |
+| Compatible indexer | `indexd Smart Autopilot v0.2.0-alpha.1` (`v0.6.1-7838380a`) |
 
-For custom redundancy policies and transfer limits, use the compatible `indexd Smart Autopilot` release. With upstream `indexd`, which does not report the custom policy values, standard behavior applies.
+For user redundancy policies, transfer limits, and Performance scoring, use the compatible `indexd Smart Autopilot` release. With upstream `indexd`, standard behavior applies; if the indexer does not support `/hosts/speed`, measurement submission is automatically disabled until restart.
 
 ## Implemented features
 
 ### Redundancy policy from the indexer
 
-- On startup and during every upload cycle, `s3d` reads `redundancyPolicy` from the indexer's `GET /account` response.
-- The configured `sia.dataShards` and `sia.parityShards` values are checked against the policy.
-- Custom schemes, such as 3-of-5 or 10-of-20, can be accepted when permitted by the indexer policy.
-- If the indexer rejects the configured scheme, uploads pause with a clear reason instead of entering a retry loop. They resume when the policy permits the scheme again.
-- If the indexer does not report a custom policy, standard behavior applies.
+- At startup and during each upload cycle, `s3d` reads `redundancyPolicy` from the indexer's `GET /account` response.
+- `sia.dataShards` and `sia.parityShards` are validated against this policy.
+- User schemes such as 3-of-5 or 10-of-20 can be used when allowed by the indexer policy.
+- If the indexer rejects the configured scheme, uploads pause with a clear explanation instead of entering an endless retry loop. They resume when the policy allows the scheme again.
+- If the indexer does not provide a user policy, standard behavior applies.
 
 ### Transfer limits from the indexer
 
 - `s3d` reads `transferLimits` from the indexer's `GET /account` response.
-- Upload and download limits configured for the account or quota in `indexd` are applied to running transfers and refreshed once per minute.
-- Network limits are converted to stream limits. The current conversion uses upload limit × K/N and download limit ÷ 1.5 as a conservative upper bound.
-- If no limits are reported, no additional transfer limit is applied.
+- Upload and download limits configured for the account or quota in `indexd` are applied to active transfers and refreshed every minute.
+- Network limits are converted into concurrency limits. The current conversion uses upload × K/N and download ÷ 1.5 as conservative upper estimates.
+- If no limits are provided, no additional rate limiting is applied.
 
-Transfer limits are estimates, not strict guarantees of total network traffic. Retries, racing requests for slow shards, and padding of the final slab can increase actual traffic.
+Transfer limits are estimates rather than strict guarantees for total network traffic. Retries, parallel requests to slow shards, and completion of the final slab can increase actual traffic.
 
-### Status and version reporting
+### Transfer measurements for Performance (G2)
 
-- `s3d status` displays **Redundancy** and **Limits** sections, including the active values and their source.
-- The build version is shown in the startup log and by `s3d version`.
-- The fork build version combines the upstream version with the short fork commit, for example `v0.2.1-a538024`.
+`s3d Smart Autopilot` collects real measurements from successful transfers and sends them to `indexd`:
 
-## Build from source
+- public SDK callbacks `WithUploadProgress` and `WithDownloadProgress` are used for uploads and downloads;
+- each measurement contains the host, transferred size, and transfer time;
+- measurements are sent through `POST /hosts/speed`;
+- transfer handlers only enqueue measurements and do not wait for the indexer response;
+- background submission runs once per minute or when 500 measurements accumulate, in batches of up to 1000;
+- when the network is unavailable, measurements remain buffered for later submission;
+- measurements below 64 KiB are skipped because they mainly represent host response time rather than throughput;
+- `s3d status` shows submitted, skipped, dropped, and buffered measurements, plus the last successful submission time.
+
+`indexd` uses these measurements to calculate **Performance (G2)** and display raw speed values on the Hosts page.
+
+### Compatibility with upstream indexd
+
+If the indexer does not accept `POST /hosts/speed` and returns `404` or `405`, `s3d` disables measurement submission until the next restart. Other functions continue to work normally.
+
+### Status and version
+
+- `s3d status` shows **Redundancy**, **Limits**, and transfer-measurement information.
+- The build version is shown in startup logs and by `s3d version`.
+- The fork build version combines the upstream version with a short fork commit hash.
+
+## Building from source
 
 Requirements:
 
 - Go 1.27
-- A C toolchain (MinGW-w64) for SQLite
+- C toolchain (MinGW-w64) for SQLite
 - PowerShell 7
-- A compatible `indexd` Smart Autopilot checkout in the sibling directory `..\indexd`
+- A compatible `indexd Smart Autopilot` checkout in the adjacent `..\indexd` directory
 
 Run from the s3d working directory:
 
@@ -74,7 +95,7 @@ Run from the s3d working directory:
 pwsh -File scripts\build-fork.ps1
 ```
 
-The executable is written to `dist\s3d-<version>.exe`.
+The executable will be created as `dist\s3d-<version>.exe`.
 
 The fork uses a local replacement in `go.mod`:
 
@@ -82,29 +103,32 @@ The fork uses a local replacement in `go.mod`:
 replace go.sia.tech/indexd => ../indexd
 ```
 
-Clone the compatible `s3d` and `indexd` working repositories side by side before building.
+Place compatible working `s3d` and `indexd` repositories in adjacent directories before building.
 
-## Upgrade from upstream s3d
+## Updating
 
-1. Upgrade `indexd` first if required by the release.
-2. Stop `s3d`.
-3. Back up the s3d data directory. Upstream `s3d v0.2.1` migrates its SQLite database.
-4. Replace the executable and start `s3d`. Existing configuration and keys should remain unchanged.
-5. Check the startup log and run `s3d status`. Look for messages such as `erasure coding scheme accepted` and `indexer transfer limits`.
+1. Update `indexd` to `indexd Smart Autopilot v0.2.0-alpha.1` first.
+2. Stop `s3d` and back up its data directory.
+3. Replace the executable and start `s3d`.
+4. Check the startup log and run `s3d status`.
+5. After the first uploads or downloads through `s3d`, measurements will reach `indexd` and Performance will be recalculated during the next cycle (up to 10 minutes).
 
-Always keep a backup of the data directory before upgrading.
+Always back up the data directory before upgrading.
 
 ## Known limitations
 
-- Alpha testing has been performed on one Windows node only.
-- Transfer limits are estimates. Retries, slow-shard races, and padding of the final slab may increase actual traffic.
-- Moving or renaming an object through S3 copy-and-delete may download the object data from Sia. This behavior has not yet been investigated.
+- This alpha release has been tested on one Windows node.
+- Measurements are submitted only for successful transfers. Uploads use the winning race attempt, while downloads use the first successful shards, so scores may be slightly optimistic for slower hosts.
+- Download speed mainly reflects host response time: the SDK reads part of a sector (about 100 KiB per shard), so download Mbps is useful for comparing hosts but does not represent full link capacity.
+- Measurements are supplied by the client and are not protected against spoofing; `indexd` checks plausibility and packet size.
+- Transfer limits are upper-bound estimates. Retries, parallel requests to slow shards, and completion of the final slab can increase actual traffic.
+- Moving or renaming an object through S3 copy + delete may download the object's data from Sia. This behavior has not yet been investigated.
 
 ## Project direction
 
-The broader Smart Autopilot project aims to make storage decisions configurable and explainable across components. Its design direction includes separate host-evaluation dimensions—reliability, performance, resources, economics, collateral/risk, technical compatibility, and network diversity—and portfolio-level placement instead of relying on one opaque score.
+The overall Smart Autopilot goal is to make storage decisions configurable and understandable across all components. In this release, `s3d` applies policies and collects transfer measurements, while host-scoring groups **G2–G5** are calculated and displayed by `indexd` in Shadow mode.
 
-These are project goals, not features implemented by this s3d alpha. In this release, `s3d` consumes policies provided by the indexer; it does not implement the complete host-scoring or portfolio-selection system itself.
+The full seven-group model — reliability, performance, resources, economics, risk/collateral, technical compatibility, and network independence — and portfolio management remain future development areas. `s3d` does not implement the complete host-scoring and portfolio-selection mechanism internally.
 
 ## Related projects
 
@@ -113,4 +137,4 @@ These are project goals, not features implemented by this s3d alpha. In this rel
 
 ## License
 
-This is an independent fork based on the upstream s3d project and is not an official Sia Foundation release or affiliated with the Sia Foundation. See the repository's `LICENSE` file for the license terms and required notices.
+This is an independent fork based on upstream s3d. It is not an official Sia Foundation release and is not affiliated with the Sia Foundation. Licensing terms and required notices are provided in `LICENSE`.
