@@ -14,7 +14,8 @@ S3 client
    v
 s3d Smart Autopilot
    |  receives redundancy policy, transfer limits, host scores and
-   |  the Autopilot Mode; sends transfer measurements and usage reports
+   |  the Autopilot Mode; sends transfer measurements, usage reports
+   |  and transfer-attempt summaries
    v
 indexd Smart Autopilot
    |  provides account policy, placement management
@@ -29,14 +30,42 @@ Responsibilities are intentionally separated. `indexd` provides policy values, t
 
 | Parameter | Value |
 |---|---|
-| Release | `v0.3.0-rc.1` |
-| Build version | `v0.3.0-rc.1` (commit `446c1b5`) |
+| Release | `v0.3.1-rc.1` |
+| Build version | `v0.3.1-rc.1` (commit `762029b`) |
 | Upstream base | `s3d v0.2.1` |
-| Compatible indexer | `indexd Smart Autopilot v0.3.0-rc.1` |
+| Client library | our fork of `sia-storage-go` at commit `f9961f7` |
+| Compatible indexer | `indexd Smart Autopilot v0.4.0-rc.1` |
+| Previous release | `v0.3.0-rc.1` |
 
-For user redundancy policies, transfer limits, Performance scoring, Smart placement and spending reports, use the compatible `indexd Smart Autopilot` release. With upstream `indexd`, standard behavior applies; if the indexer does not support `/hosts/speed` or `/hosts/usage`, the submission is automatically disabled until restart.
+For user redundancy policies, transfer limits, Performance scoring, Smart placement, spending reports and the host work share report, use the compatible `indexd Smart Autopilot` release. With upstream `indexd`, standard behavior applies; if the indexer does not support `/hosts/speed` or `/hosts/usage`, the submission is automatically disabled until restart.
 
 ## Implemented features
+
+### Network write modes (new)
+
+Selected in `s3d.yml`; no rebuild is needed.
+
+| Mode | Settings | How it works |
+|---|---|---|
+| **Default** | (nothing) | as in the original: racing writes (a backup attempt on another host if the first is slow) |
+| **No races** | `uploadRacing: false` and `uploadAttemptTimeoutSeconds: 30` | a shard is written to one host; if it does not finish in time, another host is taken. No extra traffic to "losing" hosts |
+| **Limited hedging** | `uploadHedgeBudget: 0.05` | an extra attempt starts only for noticeably slow writes: the wait time comes from the host's write history (Kaplan–Meier estimate) and the share of such attempts is capped by a budget (5% of first attempts per minute) |
+
+In our measurements on one PC with three hosts, the best result came from the **no-races mode with a buffer of 4 slabs**. The result depends on your hosts and connection, so choose the mode by measuring.
+
+### Buffer parameters (new)
+
+- `uploadMaxBufferedSlabs`: how many slabs are held in memory at once during upload. This is the key speed parameter: more is faster but uses more memory and puts more simultaneous load on hosts.
+- `downloadMaxBufferedChunks`: the same for download.
+
+Example `s3d.yml` fragment that we used:
+
+```yaml
+uploadThreads: 1
+uploadRacing: false
+uploadAttemptTimeoutSeconds: 30
+uploadMaxBufferedSlabs: 4
+```
 
 ### Redundancy policy from the indexer
 
@@ -84,13 +113,31 @@ The mode and the Smart Overall of the hosts arrive with the host list from `inde
 - `s3d` sums the successful transfers per host and direction (without the 64 KiB filter that applies to the speed measurements) and sends them once a minute through `POST /hosts/usage`: batches of up to 1000 records with an id, retried with the same id; a last report is sent on shutdown.
 - `indexd` estimates the cost from the host prices and shows the spending per host on the Contracts page.
 
+### Transfer-attempt summaries for indexd (new)
+
+For each host and direction (read or write), `s3d` counts attempts and their outcomes and sends `indexd` a summary once a minute:
+
+- attempts (only whole-sector transfers of 4 MiB or more; shorter ones are counted separately as `shortAttempts`);
+- lost races, timeouts, connection failures;
+- **host error responses** (`hostErrors`): the host itself answered with an error ("not enough storage", "internal error", "sector not found" and the like). Client-side errors (bad request, payment, expired prices) and transport failures are not included.
+
+`indexd` uses this data in the host work share report and for diagnostics. The effect on transfer speed is negligible (hundreds of nanoseconds per event).
+
+### Client library changes (new)
+
+`s3d` embeds our branch of `sia-storage-go` with three changes:
+
+- transfer attempt events (success, timeout, cancellation, lost race, connection failure, host error) are delivered to the application;
+- the `ConnectError` type distinguishes a failure to connect to a host from errors after the connection is established;
+- upload improvements that the write modes above rely on.
+
 ### Compatibility with upstream indexd
 
 If the indexer does not accept `POST /hosts/speed` or `POST /hosts/usage` and returns `404` or `405`, `s3d` disables the submission until the next restart. Other functions continue to work normally.
 
 ### Status and version
 
-- `s3d status` shows **Redundancy**, **Limits**, transfer-measurement information and a **Host usage** section (reports sent, queued, dropped, last success).
+- `s3d status` shows **Redundancy**, **Limits**, transfer-measurement information, a **Host usage** section (reports sent, queued, dropped, last success) and, new in this release, **Attempts counted** and **Host errors** lines broken down by host and direction.
 - The build version is shown in startup logs and by `s3d version`.
 
 ## Building from source
@@ -108,7 +155,7 @@ Run from the s3d working directory:
 pwsh -File scripts\build-fork.ps1
 ```
 
-The executable will be created as `dist\s3d-<version>.exe`. For a release build, pass the release version: `pwsh -File scripts\build-fork.ps1 -ReleaseVersion v0.3.0-rc.1` (a working tree with uncommitted changes is refused).
+The executable will be created as `dist\s3d-<version>.exe`. For a release build, pass the release version: `pwsh -File scripts\build-fork.ps1 -ReleaseVersion v0.3.1-rc.1` (a working tree with uncommitted changes is refused).
 
 The fork uses a local replacement in `go.mod`:
 
@@ -120,18 +167,23 @@ Place compatible working `s3d` and `indexd` repositories in adjacent directories
 
 ## Updating
 
-1. Update `indexd` to `indexd Smart Autopilot v0.3.0-rc.1` first.
-2. Stop `s3d` and back up its data directory.
-3. Replace the executable and start `s3d`.
-4. Check the startup log and run `s3d status`.
-5. **`s3d` follows the `indexd` mode.** If `indexd` is in `Smart Active`, the new `s3d` starts to place by Smart Overall within 10 minutes. To watch first, switch `indexd` to `Smart Shadow` before starting `s3d`, check `smart-autopilot.log`, then switch to `Smart Active`.
-6. After the first uploads or downloads through `s3d`, measurements and usage reports will reach `indexd`, and Performance will be recalculated during the next cycle (up to 10 minutes).
+1. Update `indexd` to `indexd Smart Autopilot v0.4.0-rc.1` first.
+2. Stop `s3d` and back up `s3d.exe`, `s3d.yml` and its data directory.
+3. Replace the executable and start `s3d`. There are no new required settings; the old `s3d.yml` works as is and the default write mode stays the same.
+4. For the no-races mode, add `uploadRacing: false` and `uploadAttemptTimeoutSeconds: 30` and restart `s3d`.
+5. Check the startup log and run `s3d version` and `s3d status`.
+6. **`s3d` follows the `indexd` mode.** If `indexd` is in `Smart Active`, the new `s3d` starts to place by Smart Overall within 10 minutes. To watch first, switch `indexd` to `Smart Shadow` before starting `s3d`, check `smart-autopilot.log`, then switch to `Smart Active`.
+7. After the first uploads or downloads through `s3d`, measurements and usage reports will reach `indexd`, and Performance will be recalculated during the next cycle (up to 10 minutes).
+
+**Rollback:** restore the previous `s3d.exe`; the old version may not accept the new keys in `s3d.yml`, so remove them from the configuration.
 
 Always back up the data directory before upgrading.
 
 ## Known limitations
 
 - This release candidate has been tested on one Windows node.
+- Our changes are based on `sia-storage-go` commit `f9961f7`. In newer versions of the official library the transport engine is replaced by Rust (`sia-sdk-rs` via cgo), and our patches do not carry over to it: as long as we stay on this version, updating the library is not possible without rework.
+- The write modes were tuned on a single system of three hosts; results may differ on other configurations.
 - The mode and the scores are refreshed with the host list (up to 10 minutes after a change).
 - In `Smart Active` the order is strict, but a host that has just failed (including one that lost a race to a faster host) is skipped for a while, so a large parallel upload can spread over more hosts than the best N.
 - Measurements are submitted only for successful transfers. Uploads use the winning race attempt, while downloads use the first successful shards, so scores may be slightly optimistic for slower hosts.
@@ -143,7 +195,7 @@ Always back up the data directory before upgrading.
 
 ## Project direction
 
-The overall Smart Autopilot goal is to make storage decisions configurable and understandable across all components. In this release candidate, `s3d` applies policies, places new uploads by Smart Overall in `Smart Active`, and collects transfer measurements and usage reports, while host-scoring groups **G2–G5**, Smart Overall and the portfolio plan are calculated by `indexd`.
+The overall Smart Autopilot goal is to make storage decisions configurable and understandable across all components. In this release candidate, `s3d` applies policies, places new uploads by Smart Overall in `Smart Active`, offers configurable write modes, and collects transfer measurements, usage reports and attempt summaries, while host-scoring groups **G2–G5**, Smart Overall and the portfolio plan are calculated by `indexd`.
 
 The full seven-group model — reliability, performance, resources, economics, risk/collateral, technical compatibility, and network independence — and portfolio management beyond ranking by scores remain future development areas. `s3d` does not implement the complete host-scoring and portfolio-selection mechanism internally.
 
