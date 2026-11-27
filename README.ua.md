@@ -1,6 +1,6 @@
 # s3d Smart Autopilot
 
-[English](README.md) | Українська | [Русский](README_RU.md)
+[English](README.md) | Українська | [Русский](README.ru.md)
 
 Форк [SiaFoundation/s3d](https://github.com/SiaFoundation/s3d), S3-сумісного шлюзу для Sia, призначений для роботи разом з **indexd Smart Autopilot**.
 
